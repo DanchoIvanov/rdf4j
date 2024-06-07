@@ -296,20 +296,24 @@ public abstract class AbstractSailConnection implements SailConnection {
 		Thread deadlockPreventionThread = null;
 
 		if (Thread.currentThread() != owner) {
-
-			if (logger.isInfoEnabled()) {
-				// use info level for this because FedX prevalently closes connections from different threads
-				logger.info(
-						"Closing connection from a different thread than the one that opened it. Connections should not be shared between threads. Opened by {} closed by {}",
-						owner, Thread.currentThread(), new Throwable("Throwable used for stacktrace"));
-			}
-
 			deadlockPreventionThread = new Thread(() -> {
 				try {
 					// This thread should sleep for a while so that the callee has a chance to finish.
 					// The callee will interrupt this thread when it is finished, which means that there were no
 					// deadlocks and we can exit.
 					Thread.sleep(sailBase.connectionTimeOut / 2);
+
+					if (logger.isInfoEnabled()) {
+						// use info level for this because FedX prevalently closes connections from different threads
+						logger.info(
+								"Closing connection from a different thread than the one that opened it. Connections should not be shared between threads. Opened by {} closed by {}",
+								owner, Thread.currentThread(), new Throwable("Throwable used for stacktrace"));
+
+						StackTraceElement[] ownerStackTrace = getOwnerStackTrace();
+						if (ownerStackTrace.length > 0) {
+							logger.info("{} {}", owner, getFormatedStackTrace(ownerStackTrace));
+						}
+					}
 
 					owner.interrupt();
 					// wait for up to 1 second for the owner thread to die
@@ -330,6 +334,27 @@ public abstract class AbstractSailConnection implements SailConnection {
 
 		}
 		return deadlockPreventionThread;
+	}
+
+	private StackTraceElement[] getOwnerStackTrace() {
+		try {
+			return owner.getStackTrace();
+		} catch (SecurityException ignore) {
+			// if a security manager exists, and it does not allow getting the stack trace of a thread,
+			// we can ignore this exception
+		}
+		return new StackTraceElement[0];
+	}
+
+	private String getFormatedStackTrace(StackTraceElement[] stackTrace) {
+		StringBuilder sb = new StringBuilder("Stack trace:")
+				.append(System.lineSeparator());
+		for (StackTraceElement element : stackTrace) {
+			sb.append("\tat ")
+					.append(element)
+					.append(System.lineSeparator());
+		}
+		return sb.toString();
 	}
 
 	@Override
@@ -930,50 +955,42 @@ public abstract class AbstractSailConnection implements SailConnection {
 	}
 
 	private void forceCloseActiveOperations() throws SailException {
-		Thread deadlockPreventionThread = startDeadlockPreventionThread();
-		try {
-			for (int i = 0; i < 10 && isActiveOperation() && !debugEnabled; i++) {
-				System.gc();
-				try {
-					Thread.sleep(1);
-				} catch (InterruptedException e) {
-					Thread.currentThread().interrupt();
-					throw new SailException(e);
-				}
-			}
-
-			if (debugEnabled) {
-
-				var activeIterationsCopy = new IdentityHashMap<>(activeIterationsDebug);
-				activeIterationsDebug.clear();
-
-				if (!activeIterationsCopy.isEmpty()) {
-					for (var entry : activeIterationsCopy.entrySet()) {
-						try {
-							logger.warn("Unclosed iteration", entry.getValue());
-							entry.getKey().close();
-						} catch (Exception e) {
-							if (e instanceof InterruptedException) {
-								Thread.currentThread().interrupt();
-								throw new SailException(e);
-							}
-							logger.warn("Exception occurred while closing unclosed iterations.", e);
-						}
-					}
-
-					var entry = activeIterationsCopy.entrySet().stream().findAny().orElseThrow();
-
-					throw new SailException(
-							"Connection closed before all iterations were closed: " + entry.getKey().toString(),
-							entry.getValue());
-				}
-			}
-		} finally {
-			if (deadlockPreventionThread != null) {
-				deadlockPreventionThread.interrupt();
+		for (int i = 0; i < 10 && isActiveOperation() && !debugEnabled; i++) {
+			System.gc();
+			try {
+				Thread.sleep(1);
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+				throw new SailException(e);
 			}
 		}
 
+		if (debugEnabled) {
+
+			var activeIterationsCopy = new IdentityHashMap<>(activeIterationsDebug);
+			activeIterationsDebug.clear();
+
+			if (!activeIterationsCopy.isEmpty()) {
+				for (var entry : activeIterationsCopy.entrySet()) {
+					try {
+						logger.warn("Unclosed iteration", entry.getValue());
+						entry.getKey().close();
+					} catch (Exception e) {
+						if (e instanceof InterruptedException) {
+							Thread.currentThread().interrupt();
+							throw new SailException(e);
+						}
+						logger.warn("Exception occurred while closing unclosed iterations.", e);
+					}
+				}
+
+				var entry = activeIterationsCopy.entrySet().stream().findAny().orElseThrow();
+
+				throw new SailException(
+						"Connection closed before all iterations were closed: " + entry.getKey().toString(),
+						entry.getValue());
+			}
+		}
 	}
 
 	/**
